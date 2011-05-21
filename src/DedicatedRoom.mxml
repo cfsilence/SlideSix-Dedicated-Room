@@ -1,0 +1,550 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mx:Application xmlns:mx="http://www.adobe.com/2006/mxml" xmlns:i="com.slidesix.*" layout="absolute" 
+	creationComplete="initChat()" paddingBottom="10" paddingLeft="10" paddingTop="10" paddingRight="10" backgroundColor="#000000">
+	<mx:Script source="com/slidesix/videoLogic.as" />
+	<mx:Style source="style/style.css"/>  
+	<mx:Style>   
+		global{  
+			modalTransparencyBlur: 0;
+			modalTransparency: 0.8;
+			modalTransparencyColor: black;
+			modalTransparencyDuration: 500;
+		}
+		.pad10{
+			paddingTop: 10px;
+			paddingBottom: 10px;
+			paddingLeft: 10px; 
+			paddingRight: 10px;
+		}
+		 
+		.boxy{
+			verticalAlign: middle;
+			textAlign: center;
+			/*
+			borderStyle: solid;
+			borderColor: #cccccc;
+			backgroundColor: #000000;
+			backgroundAlpha: 0.5;
+			*/
+			paddingBottom: 0;
+			paddingTop: 0;
+			paddingLeft: 0;
+			paddingRight: 0;
+		}
+		.header{
+			fontSize: 12px;
+			fontWeight: bold;
+			letterSpacing: 2;
+		}
+	</mx:Style>
+	<mx:Script>
+		<![CDATA[
+			import com.adobe.crypto.MD5;
+			import com.slidesix.*;
+			import com.slidesix.vo.users.User;
+			
+			import mx.collections.ArrayCollection;
+			import mx.collections.Sort;
+			import mx.collections.SortField;
+			import mx.controls.Alert;
+			import mx.managers.PopUpManager;
+			import mx.messaging.ChannelSet;
+			import mx.messaging.Consumer;
+			import mx.messaging.Producer;
+			import mx.messaging.channels.AMFChannel;
+			import mx.messaging.events.MessageEvent;
+			import mx.messaging.events.MessageFaultEvent;
+			import mx.messaging.messages.AsyncMessage;
+			import mx.messaging.messages.IMessage;
+			import mx.rpc.events.FaultEvent;
+			import mx.rpc.events.ResultEvent;
+			import mx.utils.ObjectUtil;
+			import mx.utils.URLUtil;
+		
+		[Bindable] public var currentSlideNumber:Number = -1;
+		[Bindable] public var room:String;
+		[Bindable] public var thisRoomURL:String;
+		[Bindable] public var alias:String;
+		[Bindable] public var host:String;
+		[Bindable] public var chatSubtopic:String;
+		[Bindable] public var slideChangedSubtopic:String;
+		[Bindable] public var baseURL:String;
+		[Bindable] public var currentUserID:int = 0;
+		[Bindable] public var currentUserUsername:String = '';
+		[Bindable] public var currentUserRole:String = 'participant';
+		[Bindable] public var currentUserFullName:String = '';
+		[Bindable] public var isCurrentUserOwner:Boolean = false;
+		[Bindable] public var roomIsPrivate:Boolean = false;
+		[Bindable] public var isReadyForAuth:Boolean = false;
+		[Bindable] public var gatewayName:String;
+		
+		[Bindable] public var currentPresentation:String;
+		//[Bindable] public var isBroadcasting:Boolean = false;
+		
+		
+		public var feedbackWindow:FeedbackWindow;
+		public var currentUser:User;
+		
+		public var chatConsumer:Consumer;
+		 
+		
+		public function initChat():void{
+			dedicatedRoomProxy.getGatewayName();
+			
+			//set up logout for javascript
+			ExternalInterface.addCallback("logoutFromJS", logout);
+
+			host = URLUtil.getServerName(Application.application.url);
+			baseURL = 'http://' + host + '/';
+			room = this.parameters.room;
+			if(room.charAt(room.length-1) == '/'){
+				room = room.substr(0,room.length-1);
+			}
+			thisRoomURL = baseURL + 'collaborate/' + room;
+			chatSubtopic = room + '-chat';
+			slideChangedSubtopic = room + '-slideChanged';
+		}
+			
+		public function getGatewayNameHandler(e:ResultEvent):void{
+			gatewayName = e.result as String;
+			initProducers();
+			initChannelSet();
+			initUserSort();
+			initSlideConsumer();
+			dedicatedRoomProxy.checkPrivate(room);		
+			getScreenChannel();	
+		}
+		
+		public var producer:Producer;
+		public function initProducers():void{
+			producer = new Producer();
+			producer.destination = 'ColdFusionGateway';
+			producer.addEventListener(MessageFaultEvent.FAULT, faultHandler);
+		}
+		
+		[Bindable] public var myChannelSet:ChannelSet;
+		public function initChannelSet():void{
+			myChannelSet = new ChannelSet();
+			var mChannel:AMFChannel = new AMFChannel('cf-polling-amf', 'http://' + host + '/flex2gateway/cfamfpolling');
+			mChannel.enableSmallMessages = false;
+			myChannelSet.addChannel(mChannel);
+			producer.channelSet = myChannelSet; 
+		}
+		
+		public var sortField:SortField;
+		public var sort:Sort;
+		public function initUserSort():void{
+			sortField = new SortField();
+          	sortField.name = 'role';
+          	sortField.numeric = false;
+          	sortField.descending = true;
+          	sortField.caseInsensitive = true;
+          	sort = new Sort();
+          	sort.fields = [sortField];
+		}
+		
+		public var slideConsumer:Consumer;
+		
+		public function initSlideConsumer():void{
+			slideConsumer = new Consumer();
+			slideConsumer.destination = 'ColdFusionGateway';
+           	slideConsumer.subtopic = slideChangedSubtopic;
+           	slideConsumer.channelSet = myChannelSet;
+           	slideConsumer.addEventListener(MessageEvent.MESSAGE, slideChangedHandler);
+           	slideConsumer.subscribe();
+		}
+		
+		[Bindable] public var usersInThisRoom:ArrayCollection;
+		
+		public function chatHandler(event:MessageEvent):void{
+			var eventMsg:IMessage = event.message;
+          	var info:Object = eventMsg.body;
+          	var msg:String = info.MSG;          	
+          	var userid:int = info.USERID;
+          	var slideNum:Number = info.SLIDE;
+          	var cLog:Array = info.CHATLOG;
+          	
+          	usersInThisRoom = info.CURRENTUSERS;
+          	usersInThisRoom.sort = sort;
+          	usersInThisRoom.refresh();
+          	
+          	if(userid != currentUserID){
+          		chatDisplay.htmlText += msg + '<br />';
+          		scrollChat()
+          	}
+			
+			if(info.SLIDE != slideImage.source){
+          		slideImage.source = info.SLIDE;
+          	}
+          	if(info.PRESENTATION != null && info.PRESENTATION != currentPresentation){
+          		currentPresentation = info.PRESENTATION;
+          	}
+          	//Alert.show(info.ISBROADCASTING.toLowerCase());
+          	if(info.ISBROADCASTING.toLowerCase() == 'yes' && !isBroadcasting){
+          		broadcast('start'); 
+          	}
+          	else if (info.ISBROADCASTING.toLowerCase() == 'no' && isBroadcasting){
+          		broadcast('stop');
+          	}
+          	
+          	if(info.LOGIN == 'yes' && cLog.length){
+          		chatDisplay.htmlText = cLog.join('<br />');
+          	}
+          	
+          	if(info.LOGOUT == 'yes' && info.USERID == currentUserID){
+	          	try {
+	          		mainStack.selectedChild = blankContainer;
+					ExternalInterface.call(
+							"function(){window.close();}"
+						)	
+				}
+				finally{
+					mainStack.selectedChild = blankContainer;
+					Alert.show('You have been logged out.  You may now close this window.');
+				}
+          	}
+
+      		if(info.PRESENTATION != null){
+      			currentPresentation = info.PRESENTATION;
+      		}
+		}
+		
+		public function getUserTimeStamp():String{
+			return '[' + timeFormatter.format(new Date()) + '] <b>' + currentUserUsername + '</b>: ';
+		}
+		
+		public function chatButtonClicked(e:MouseEvent):void{
+			var msg:String = chatInput.text;
+			if(msg.length){
+				var c:String = getUserTimeStamp() + msg;
+				chatDisplay.htmlText += getUserTimeStamp() + htmlEditFormat(msg) + '<br />';
+				chatInput.text = '';
+				scrollChat();
+				sendChat(c);
+			}
+		}
+		public function sendChat(c:String):void{
+			var d:Date = new Date();
+			var msg:AsyncMessage = new AsyncMessage();
+			msg.headers.gatewayid = gatewayName;
+			msg.body = {userid: currentUserID, chat: c, timestamp: d, room: room, username: currentUserUsername, presentation: currentPresentation, role: currentUserRole};
+			producer.subtopic = chatSubtopic;
+			producer.send(msg);
+		}
+		
+		//handler for the slide changed consumer
+		public function slideChangedHandler(event:MessageEvent):void{
+			var msg:IMessage = event.message;
+          	if(msg.body.SLIDE != slideImage.source){
+          		slideImage.source = msg.body.SLIDE;
+          	}
+          	if(msg.body.PRESENTATION != null){
+          		currentPresentation = msg.body.PRESENTATION;
+          	}
+          	if(msg.body.ISBROADCASTING.toLowerCase() == 'yes'){
+          		isBroadcasting = true;
+          	}
+          	else{
+          		isBroadcasting = false;
+          	}
+		}
+		
+		public function broadcastLogin():void{
+			//now that the main container is visible set up the video stuff
+			initVideo();
+			
+			var d:Date = new Date();
+			var msg:AsyncMessage = new AsyncMessage();
+			msg.headers.gatewayid = gatewayName;
+			var u:String = currentUserUsername;
+			
+			if(isCurrentUserOwner){
+				u = currentUserFullName;
+			}
+
+			var m:String = getUserTimeStamp() + '<i> joined the room</i>';
+			
+			msg.body = {userid: currentUserID, chat: m, timestamp: d, room: room, username: u, presentation: currentPresentation, login: true, role: currentUserRole};
+			producer.subtopic = chatSubtopic;
+			producer.send(msg);
+		}
+		
+		public function logout():void{
+			try{
+				mainStack.selectedChild = blankContainer;
+				var d:Date = new Date();
+				var msg:AsyncMessage = new AsyncMessage();
+				msg.headers.gatewayid = gatewayName;
+				var m:String = getUserTimeStamp() + '<i> left the room</i>';
+				chatDisplay.htmlText += m + '<br />';
+				msg.body = {userid: currentUserID, chat: m, timestamp: d, room: room, username: currentUserUsername, presentation: currentPresentation, logout: true, role: currentUserRole};
+				producer.subtopic = chatSubtopic;
+				producer.send(msg);
+			}
+			catch(e:Error){
+				
+			}
+		}
+		
+		public function openFeedbackWindow():void{
+			feedbackWindow = FeedbackWindow(PopUpManager.createPopUp(this, FeedbackWindow, true));
+			PopUpManager.centerPopUp(feedbackWindow);
+			feedbackWindow.contactMsg.text = '';
+			feedbackWindow.contactURL = baseURL + 'index.cfm?event=contact.send';
+			feedbackWindow.contactFrom = currentUserUsername;
+			feedbackWindow.contactFromID = currentUserID;
+			feedbackWindow.contactFromEmail = currentUser.EMAIL;
+		}
+		
+		public function getCurrentUser():void {
+            sessionProxyService.getCurrentUser();	
+		}
+			
+		public function getScreenChannel():void {
+            dedicatedRoomProxy.getScreenChannel(room);	
+		}
+		public function faultHandler(e:FaultEvent):void {
+			Alert.show('An unexpected error has occurred.  We\'re sorry for the inconvenience.  We have been notified and are working to resolve this issue.');
+			trace(ObjectUtil.toString(e));
+			//Alert.show(ObjectUtil.toString(e.message));
+		}
+		public function checkPrivateHandler(e:ResultEvent):void{
+			roomIsPrivate = e.result as Boolean;
+			getCurrentUser();
+		}
+			
+		public function checkPassword():void{
+			var p:String = loginPassword.text;
+			p = MD5.hash(p);
+			dedicatedRoomProxy.checkAccess(room, p);
+		}
+			
+		public function checkAccessHandler(e:ResultEvent):void{
+			var isValid:Boolean = e.result as Boolean;
+			if(!isValid){
+				Alert.show('Incorrect Password', 'Oops...');
+			}
+			else{
+				currentUserUsername = loginUsername.text;
+				mainStack.selectedChild = mainContainer;
+			}
+		}
+		
+		public function getIsUserNameAvailableHandler(e:ResultEvent):void{
+			var isUsernameAvailable:Boolean = e.result as Boolean;
+			if(isUsernameAvailable){
+				checkCredentials();
+			}
+			else{
+				Alert.show('Name is already in use.  Please choose a new one.', 'Error');
+			}
+		}
+			
+		public function getScreenChannelHandler(e:ResultEvent):void{
+			screenStreamName = String(e.result);
+		}
+		
+		public function checkUsername():void{
+			var params:Object = new Object();
+            params.room = room;
+			params.username = loginUsername.text;
+			params.method = 'getIsUserNameAvailable';
+			dedicatedRoomProxy.getIsUserNameAvailable(params);
+		}
+		
+		public function checkCredentials():void{
+			var p:String = loginPassword.text;
+			if(!loginUsername.text.length){
+				Alert.show('Please enter your name');
+			}
+			else{
+				if(roomIsPrivate){
+					checkPassword();
+				}
+				else{
+					currentUserUsername = loginUsername.text;
+					mainStack.selectedChild = mainContainer;
+					//time to party - it's all good
+				}
+			}
+		}
+		
+		public function getCurrentUserHandler(event:ResultEvent):void {
+			try{
+				currentUser = event.result.USER as User;
+			}
+			catch(e:Error){
+			}
+			if(currentUser != null){
+				currentUserID = currentUser.ID;
+				currentUserUsername = currentUser.USERNAME;
+				currentUserFullName = currentUser.FIRSTNAME + ' ' + currentUser.LASTNAME;
+				loginUsername.text = currentUserFullName;
+			}
+			
+			isReadyForAuth = true;
+			
+			//keep the session alive
+			var sessionTimer:Timer = new Timer(60000, 0);
+			sessionTimer.addEventListener("timer", sessionTimerHandler);
+			sessionTimer.start();
+			
+			chatConsumer = new Consumer();
+			chatConsumer.destination = 'ColdFusionGateway';
+           	chatConsumer.subtopic = chatSubtopic;
+           	chatConsumer.channelSet = myChannelSet;
+           	chatConsumer.addEventListener(MessageEvent.MESSAGE, chatHandler);
+           	chatConsumer.subscribe();	
+   			
+   			mainStack.visible = true;
+   			if(currentUserUsername == room){
+   				isCurrentUserOwner = true;
+   				currentUserUsername = currentUserFullName;
+				currentUserRole = 'presenter';
+   			}
+   			
+			if(!isCurrentUserOwner){
+				mainStack.selectedChild = loginContainer;
+			}
+			else{
+				//let the man in...
+				mainStack.selectedChild = mainContainer;
+			}
+		}
+		
+		public function htmlEditFormat(h:String):String{
+			var ret:String = h.split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;");
+			return ret;
+		}
+		
+		public function scrollChat():void{
+			chatDisplay.verticalScrollPosition = chatDisplay.maxVerticalScrollPosition;
+		}
+		 
+		
+		public function sessionTimerHandler(event:TimerEvent):void {
+            sessionProxyService.ping();
+        }
+        
+        public function checkEnter(event:KeyboardEvent):void{
+			/// <cr> or <enter>
+			if (event.keyCode == Keyboard.ENTER){
+				var e:MouseEvent = new MouseEvent(MouseEvent.CLICK);
+				chatButtonClicked(e);
+			}
+		}
+		
+		public function goToSlideSix():void {
+			var viewURL:String = baseURL;
+			var urlRequest:URLRequest = new URLRequest(viewURL);
+			navigateToURL(urlRequest, '_self');
+		}
+		
+		public function setClipboard():void{
+			System.setClipboard(thisRoomURLDisplay.text);
+			Alert.show('Link has been copied to your clipboard.');
+		}
+		]]>
+	</mx:Script>
+	<mx:DateFormatter id="timeFormatter" formatString="L:NN:SS" />
+	
+	<!-- services -->
+	
+	<mx:RemoteObject id="sessionProxyService" endpoint="/flex2gateway/" destination="ColdFusion" source="services.users.SessionProxy" showBusyCursor="true">
+		<mx:method name="getCurrentUser" result="getCurrentUserHandler(event)" fault="faultHandler(event)" />
+	</mx:RemoteObject>
+	
+	<mx:RemoteObject id="dedicatedRoomProxy" endpoint="/flex2gateway/" destination="ColdFusion" source="services.eventGateways.dedicatedRoom.DedicatedRoomProxy" showBusyCursor="true">
+		<mx:method name="getIsUserNameAvailable" result="getIsUserNameAvailableHandler(event)" fault="faultHandler(event)" />
+		<mx:method name="checkAccess" result="checkAccessHandler(event)" fault="faultHandler(event)" />
+		<mx:method name="checkPrivate" result="checkPrivateHandler(event)" fault="faultHandler(event)" />
+		<mx:method name="getScreenChannel" result="getScreenChannelHandler(event)" fault="faultHandler(event)" />
+		<mx:method name="getGatewayName" result="getGatewayNameHandler(event)" fault="faultHandler(event)" />
+	</mx:RemoteObject>
+	
+	<mx:ViewStack id="mainStack" width="100%" height="100%" visible="false" paddingTop="10" paddingLeft="10" paddingRight="10" paddingBottom="10">
+		<mx:VBox width="100%" height="100%" id="loginContainer" horizontalAlign="center" verticalAlign="middle">
+			<mx:Panel id="loginPanel" width="300" height="180" title="Enter Credentials" verticalAlign="middle">
+				<mx:HBox width="100%">
+					<mx:Text text="Name" width="80" textAlign="right" />
+					<mx:TextInput id="loginUsername"  text="{isCurrentUserOwner ? currentUserFullName : currentUserUsername}" />
+				</mx:HBox>
+				<mx:HBox width="100%" visible="{roomIsPrivate}" height="{roomIsPrivate ? 35 : 0}">
+					<mx:Text text="Password" width="80" textAlign="right" />
+					<mx:TextInput id="loginPassword" text="" displayAsPassword="true" />
+				</mx:HBox>
+				<mx:HBox width="100%">
+					<mx:Text text="" width="80" />
+					<mx:Button id="authenticateBtn" label="Enter The Room" click="checkUsername()" width="{loginUsername.width}" enabled="{isReadyForAuth}" />
+				</mx:HBox>
+			</mx:Panel>
+		</mx:VBox>
+		<mx:VBox width="100%" height="100%" id="mainContainer" show="broadcastLogin()">
+			<mx:HBox id="contentContainer" width="100%" height="100%">   
+				<!--<mx:Panel id="podContainer" width="300" height="100%" titleStyleName="header" titleIcon="@Embed(source='assets/collaborate.png')" styleName="pad10">-->
+					<mx:VBox id="optionsDisplayContainer" width="300" maxWidth="300" height="100%">
+						<mx:Panel title="Live Broadcast" width="100%" height="{isBroadcasting ? 265 : -5}" visible="{isBroadcasting}" resizeEffect="Resize" status="{isBroadcasting ? 'Live' : 'No Feed'}" id="vidPanel">
+							<mx:VBox id="broadcastContainer" width="100%" height="100%" verticalAlign="middle" horizontalAlign="center">
+								<mx:UIComponent id="vidContainer" width="250" height="188" />
+							</mx:VBox>
+						</mx:Panel>
+						
+						<mx:Panel width="100%" title="{'Participants (' + usersInThisRoom.length + ')'}">
+							<mx:List id="userList" dataProvider="{usersInThisRoom}" width="100%" height="90">
+								<mx:itemRenderer> 
+					                <mx:Component> 
+					   	                <mx:Text text="{data.username} {data.role == 'presenter' ? '(Presenter)' : ''}" fontSize="10"  />
+					                 </mx:Component> 
+				     			 </mx:itemRenderer>
+							</mx:List>
+						</mx:Panel>
+						
+						<mx:Panel title="Chat" width="100%" height="100%">
+							<mx:TextArea id="chatDisplay" width="100%" height="100%" editable="false" valueCommit="scrollChat()" />
+							<mx:ControlBar>
+								<mx:HBox id="chatInputContainer" width="100%" styleName="pad10">
+									<mx:TextInput id="chatInput" width="75%" keyUp="checkEnter(event)" tabIndex="1" />
+									<mx:Button id="sendChatBtn" width="25%" label="Send" click="chatButtonClicked(event)" tabIndex="2" />				
+								</mx:HBox>
+							</mx:ControlBar>
+						</mx:Panel>
+					
+					</mx:VBox>
+				<!--</mx:Panel>-->
+				
+					
+					<mx:Panel id="slideContainer" height="100%" width="100%" title="{currentPresentation.length &amp;&amp; !isScreenSharing ? currentPresentation : isScreenSharing ? 'Screen Sharing ' : 'Nothing currently being shared'}">
+						<!-- top="{(slideContainer.height - slideImage.height) / 2}" -->
+						<mx:Canvas id="slideCanvas" width="100%" height="100%">
+							<mx:HBox width="100%" height="100%" visible="{!isScreenSharing}" top="0" left="0">
+								<i:SmoothImage id="slideImage" width="100%" height="100%" maintainAspectRatio="true" cacheAsBitmap="true" scaleContent="true" verticalAlign="middle" horizontalAlign="center" />						
+							</mx:HBox>
+							
+							<mx:HBox width="100%" height="100%" visible="{isScreenSharing}" top="0" left="0">
+								<mx:UIComponent id="screenVidContainer" width="100%" height="100%" />
+							</mx:HBox>
+						</mx:Canvas>
+						 
+						<mx:ControlBar id="slideControlBar">
+							<mx:HBox width="100%" styleName="pad10">
+								<mx:HBox width="100%">
+									<mx:TextInput id="thisRoomURLDisplay" text="{thisRoomURL}" editable="false" width="200" />
+									<mx:Button id="copyURLBtn" click="setClipboard();" label="Copy" />
+									<mx:Button icon="@Embed(source='assets/comment.png')" click="openFeedbackWindow()" label="Feedback" />
+									<mx:Button click="logout()" label="Logout Of Chat" />
+								</mx:HBox>
+								<mx:Spacer width="100%" />
+								
+								<mx:HBox width="100%" styleName="boxy" horizontalAlign="right"> 
+									<i:SmoothImage id="logo" source="@Embed(source='assets/logo.png')" click="goToSlideSix()" buttonMode="true" useHandCursor="true" />
+								</mx:HBox>
+							</mx:HBox>
+						</mx:ControlBar>
+					</mx:Panel>
+			</mx:HBox>
+		</mx:VBox>	
+		<mx:VBox id="blankContainer" width="100%" height="100%">
+			
+		</mx:VBox>
+	</mx:ViewStack>
+</mx:Application>

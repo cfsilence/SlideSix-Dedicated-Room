@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mx:TitleWindow xmlns:mx="http://www.adobe.com/2006/mxml" creationComplete="init();" width="500" height="300" showCloseButton="true" 
+	title="Feedback..." verticalAlign="middle">
+	<mx:Script>
+		<![CDATA[
+		import mx.controls.Alert;
+		import mx.events.CloseEvent;
+		import mx.rpc.events.ResultEvent;
+		
+		[Bindable] public var contactURL:String;
+		public var contactFrom:String;
+		public var contactFromID:int;
+		public var contactFromEmail:String;
+		
+		public function init():void {
+			this.addEventListener(CloseEvent.CLOSE, closeHandler);
+		}
+		public function closeHandler(e:Event):void {
+			this.visible = false;
+		}
+		
+		public function validateContactForm():Array {
+			var errors:Array = new Array();
+			
+			if (!contactMsg.text.length) {
+				errors.push('Please enter your feedback.');
+			}
+			
+			return errors;
+		}
+		public function sendContactClicked(event:MouseEvent):void {
+			var e:Array = validateContactForm();
+			if (e.length > 0) {
+				var msg:String = 'Please address the following errors:\n';
+				for (var i:int = 0; i < e.length; i++) {
+					msg += '*' + e[i] + '\n';
+				}
+				Alert.show(msg, 'Attention');
+			}
+			else {
+				sendContact();
+			}
+		}
+		public function sendContact():void {
+			var p:Object = new Object();
+			p.contactFromEmail = contactFromEmail;
+			p.contactFrom = contactFrom + '(' + contactFromID + ')';
+			p.contactMsg = contactMsg.text;
+            contactService.send(p);
+		}
+		
+		public function contactServiceHandler(event:ResultEvent):void {
+			Alert.show('Feedback Sent.  Thanks!');
+			this.visible = false;
+		}
+		public function goIdeaScale():void {
+			var urlRequest:URLRequest = new URLRequest('http://slidesix.ideascale.com');
+			navigateToURL(urlRequest, '_blank');	
+		}
+		]]>
+	</mx:Script>
+	
+	<mx:HTTPService showBusyCursor="true" id="contactService" url="{contactURL}" resultFormat="text" result="contactServiceHandler(event)" fault="parentApplication.faultHandler(event)" />
+	
+	<mx:VBox styleName="formContainer" width="100%">
+		<mx:Text width="100%" textAlign="center" text="Use this form to provide us with feedback on the collaborate module.  You can submit bug reports or just make a suggestion on a feature you'd like to see here." />
+		<mx:TextArea id="contactMsg" width="100%" height="165" />
+	</mx:VBox>
+	<mx:HBox styleName="formContainer" width="100%" horizontalAlign="left">
+		<mx:Button id="goIdeaScaleBtn" label="SlideSix On IdeaScale" click="goIdeaScale()" icon="@Embed(source='../../assets/comment.png')" toolTip="Enter Feedback at IdeaScale!" />
+		<mx:Spacer width="100%" />
+		<mx:Button id="sendFeedbackBtn" label="Send" click="sendContactClicked(event)" icon="@Embed(source='../../assets/email_go.png')" toolTip="Send feedback to us, we love it!" />
+	</mx:HBox>
+</mx:TitleWindow>
